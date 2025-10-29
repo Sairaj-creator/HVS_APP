@@ -138,3 +138,56 @@ async def process_dictation_and_save_note(websocket: WebSocket, state: SessionSt
         if db: # Close the specific DB session we opened
             db.close()
         log.info(f"[{state.id}] process_dictation_and_save_note finished.")
+
+
+async def transcribe_file_and_save_note(file_path: str, encounter_id: int, author_id: int, note_type: str = 'doctor_dictation'):
+    """
+    Transcribe a single audio file (WAV/LINEAR16 recommended) and save the resulting note.
+    This is intended for REST-style uploads where the client POSTs a complete audio file.
+    Returns a dict with { transcript, note_id } on success.
+    """
+    db = None
+    try:
+        client = speech.SpeechClient()
+        log.info(f"Transcribing file: {file_path}")
+
+        with open(file_path, 'rb') as f:
+            content = f.read()
+
+        audio = speech.RecognitionAudio(content=content)
+        config = get_asr_config()
+
+        # Use synchronous recognize for single-file uploads (suitable for small files)
+        response = client.recognize(config=config, audio=audio)
+
+        # Accumulate transcript
+        transcript = ''
+        for result in response.results:
+            if result.alternatives:
+                transcript += result.alternatives[0].transcript.strip() + ' '
+
+        transcript = transcript.strip()
+        log.info(f"Transcription finished; length={len(transcript)}")
+
+        if transcript:
+            # Save note to DB using note_service (run in thread pool for sync DB ops)
+            db = SessionLocal()
+            saved_note = await asyncio.to_thread(
+                note_service.create_note,
+                db,
+                encounter_id,
+                author_id,
+                note_type,
+                transcript,
+            )
+            note_id = getattr(saved_note, 'id', None)
+            return { 'transcript': transcript, 'note_id': note_id }
+        else:
+            return { 'transcript': '', 'note_id': None }
+
+    except Exception as e:
+        log.error(f"transcribe_file_and_save_note error: {e}", exc_info=True)
+        raise
+    finally:
+        if db:
+            db.close()

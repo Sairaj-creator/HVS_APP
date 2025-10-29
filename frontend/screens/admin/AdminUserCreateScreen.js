@@ -18,11 +18,9 @@ import { Picker } from '@react-native-picker/picker';
 // Import the correct admin function from api.js
 import { apiAdminCreateUser } from '../../services/api.js';
 
-// !! IMPORTANT !!
-// How does the Admin authenticate? They need a token.
-// For now, we assume the Admin logs in separately and has a token.
-// We might need to adjust this based on your friend's exact plan.
-const TEMP_ADMIN_TOKEN = 'YOUR_ADMIN_JWT_TOKEN_HERE'; // Placeholder
+// Get the current admin token from AuthContext so we don't have to hardcode it.
+import { useAuth } from '../../context/AuthContext';
+import { apiAdminGetUserList } from '../../services/api.js';
 
 const AdminUserCreateScreen = ({ navigation }) => {
   const [username, setUsername] = useState(''); // Email
@@ -30,6 +28,7 @@ const AdminUserCreateScreen = ({ navigation }) => {
   const [fullName, setFullName] = useState(''); // Added Full Name
   const [role, setRole] = useState('doctor'); // Default role
   const [isLoading, setIsLoading] = useState(false);
+  const { userToken } = useAuth();
 
   const handleCreateUser = async () => {
     if (!username || !password || !fullName) {
@@ -47,8 +46,8 @@ const AdminUserCreateScreen = ({ navigation }) => {
         full_name: fullName, // Make sure backend expects this
       };
 
-      // Call the ADMIN endpoint, passing the Admin's token
-      const result = await apiAdminCreateUser(userData, TEMP_ADMIN_TOKEN);
+  // Call the ADMIN endpoint, passing the currently-signed-in Admin token
+  const result = await apiAdminCreateUser(userData, userToken);
 
       Alert.alert(
         'Success',
@@ -64,6 +63,17 @@ const AdminUserCreateScreen = ({ navigation }) => {
       Alert.alert('Creation Failed', error.message);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleShowUsers = async () => {
+    try {
+      const users = await apiAdminGetUserList(userToken);
+      // Show usernames in an alert (truncate if too long)
+      const short = users.map(u => `${u.id}: ${u.username} (${u.role})`).join('\n');
+      Alert.alert('Stored Users', short || 'No users found');
+    } catch (e) {
+      Alert.alert('Error', e.message || 'Failed to load users');
     }
   };
 
@@ -119,6 +129,11 @@ const AdminUserCreateScreen = ({ navigation }) => {
             title={isLoading ? 'Creating...' : 'Create User Account'}
             onPress={handleCreateUser}
             disabled={isLoading}
+          />
+          <View style={{ height: 10 }} />
+          <StyledButton
+            title="Show Stored Users"
+            onPress={handleShowUsers}
           />
         </View>
 

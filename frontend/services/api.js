@@ -1,16 +1,19 @@
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
+import * as mockDb from './mockDb';
 
-//
-// --- THIS IS THE ONLY LINE YOU WILL EVER CHANGE ---
-//
-// FOR YOUR "SYNC TEST" (running your friend's backend on your laptop):
-const BASE_URL = 'http://127.0.0.1:8000'; // 127.0.0.1 means "this machine"
+// Determine a sensible default backend URL depending on platform.
+// - On Android emulators use 10.0.2.2 to reach the host machine.
+// - On iOS simulators and web use localhost/127.0.0.1.
+// You can still override by editing this line or by wiring an env var when building.
+const DEFAULT_BASE_LOCALHOST = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 
-// FOR DEVELOPMENT (testing with your friend over Wi-Fi):
-// Ask him for his Local IP:
-// const BASE_URL = 'http://192.168.1.5:8000';
-//
-// ----------------------------------------------------
+// For quick local development change this if you need to hit a remote machine on your LAN:
+// e.g. const BASE_URL = 'http://192.168.1.5:8000';
+// Use the platform-aware default (Android emulator -> 10.0.2.2, others -> localhost)
+// To override for a physical device set the LAN IP here, e.g.:
+// const BASE_URL = 'http://192.168.75.1:8000';
+const BASE_URL = 'MOCK';
+export const MOCK = BASE_URL === 'MOCK';
 
 /**
  * The main login function.
@@ -18,6 +21,20 @@ const BASE_URL = 'http://127.0.0.1:8000'; // 127.0.0.1 means "this machine"
  */
 export const apiLogin = async (username, password) => {
   console.log('Attempting login with:', username);
+  if (MOCK) {
+    try {
+      const token = await mockDb.signInMock(username, password);
+      if (!token) {
+        Alert.alert('Login Failed', 'Invalid credentials (mock)');
+        return null;
+      }
+      return token;
+    } catch (e) {
+      console.error('Mock sign in error', e);
+      Alert.alert('Login Failed', e.message || 'Mock login failed');
+      return null;
+    }
+  }
 
   try {
     const body = new URLSearchParams();
@@ -59,6 +76,17 @@ export const apiLogin = async (username, password) => {
 export const apiRegisterUser = async (userData) => {
   // userData = { username, password, role }
   console.log('Attempting to register new user (Self-Registration):', userData.username);
+  if (MOCK) {
+    try {
+      const user = await mockDb.registerMockUser(userData);
+      return user;
+    } catch (e) {
+      console.error('Mock registration error', e);
+      const message = e.message || 'Mock registration failed';
+      const err = new Error(message);
+      throw err;
+    }
+  }
 
   try {
     // Calls your friend's: POST /api/v1/register
@@ -70,13 +98,32 @@ export const apiRegisterUser = async (userData) => {
       body: JSON.stringify(userData),
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.detail || 'Failed to register');
+    // Try to parse JSON response (may be validation errors)
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (e) {
+      // Non-JSON response (rare)
+      data = null;
     }
 
-    return data; // Return the new user object
+    if (!response.ok) {
+      // Pydantic/FastAPI validation errors often come as { detail: [ ... ] }
+      let message = 'Failed to register';
+      if (data && data.detail) {
+        if (Array.isArray(data.detail)) {
+          // Turn the array into a readable string
+          message = JSON.stringify(data.detail);
+        } else if (typeof data.detail === 'string') {
+          message = data.detail;
+        } else {
+          message = JSON.stringify(data.detail);
+        }
+      }
+      throw new Error(message);
+    }
+
+    return data; // Return the new user object (parsed JSON)
   } catch (error) {
     console.error('Registration error:', error);
     // Re-throw the error so the screen can catch it
@@ -89,6 +136,10 @@ export const apiRegisterUser = async (userData) => {
  * It automatically adds the JWT (access_token) for us.
  */
 const fetchWithToken = async (endpoint, token, options = {}) => {
+  if (MOCK) {
+    // Delegate to mock DB
+    return mockDb.mockFetch(endpoint, token, options);
+  }
   const headers = {
     'Content-Type': 'application/json',
     ...options.headers,
@@ -96,7 +147,9 @@ const fetchWithToken = async (endpoint, token, options = {}) => {
   };
 
   try {
-    const response = await fetch(`${BASE_URL}${endpoint}`, {
+    const fullUrl = `${BASE_URL}${endpoint}`;
+    console.log(`API: calling ${fullUrl}`);
+    const response = await fetch(fullUrl, {
       ...options,
       headers,
     });
@@ -130,8 +183,17 @@ const fetchWithToken = async (endpoint, token, options = {}) => {
     return response.json();
 
   } catch (error) {
+    // Enhance network error messaging for Expo/native runtime
     console.error(`API call to ${endpoint} failed:`, error);
-    // Re-throw the error so the calling screen can handle it
+    if (error && error.message && error.message.includes('Network request failed')) {
+      const help = `Network request failed when calling ${BASE_URL}${endpoint}.\n` +
+        `If you're running the app on an Android emulator use 10.0.2.2 in BASE_URL.\n` +
+        `If you're on a physical device, set BASE_URL to your PC's LAN IP (e.g. http://192.168.1.55:8000) and ensure firewall allows port 8000.`;
+      console.error(help);
+      // Throw a helpful error so the UI shows it
+      throw new Error(help);
+    }
+    // Re-throw other errors unchanged
     throw error;
   }
 };
@@ -211,34 +273,32 @@ export const apiAdminGetUserList = (token) => {
 
 // --- Audio Recording Service Logic ---
 
+// Streaming implementation (chunked-record-and-send) using expo-av + expo-file-system
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 
-let recording = null; // Variable to hold the recording object
+let _ws = null;
+let _recording = null;
+let _segmentInterval = null;
+let _isStreaming = false;
+
+// Helper: basic base64 check
+function isBase64(str) {
+  return typeof str === 'string' && str.length > 0;
+}
 
 /**
- * Requests microphone permissions from the user.
- * Returns true if granted, false otherwise.
+ * Requests microphone permissions from the user and prepares audio mode.
  */
 export const requestAudioPermissions = async () => {
-  console.log('Requesting microphone permissions...');
   try {
     const { status } = await Audio.requestPermissionsAsync();
     if (status === 'granted') {
-      console.log('Permission granted!');
-      // Set audio mode for iOS (important for recording)
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true, // Optional, depending on needs
-      });
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
       return true;
-    } else {
-      console.log('Permission denied!');
-      Alert.alert(
-        'Permission Required',
-        'Microphone access is needed for handoff recording.'
-      );
-      return false;
     }
+    Alert.alert('Permission Required', 'Microphone access is needed for handoff recording.');
+    return false;
   } catch (err) {
     console.error('Failed to request permissions', err);
     Alert.alert('Error', 'Could not request microphone permissions.');
@@ -247,146 +307,144 @@ export const requestAudioPermissions = async () => {
 };
 
 /**
- * Starts the audio recording and WebSocket connection (Placeholder).
- * Returns true if successful, false otherwise.
- * 'onMessageReceived' is a callback function from RecordingScreen
- * to handle messages from the WebSocket.
+ * Start streaming audio by repeatedly recording short segments and sending them as base64 text frames.
+ * Works in managed Expo and avoids relying on atob/btoa.
  */
-export const startStreamingAudio = async (patientId, token, onMessageReceived) => {
-  if (recording) {
-    console.log('Recording already in progress.');
-    return false;
-  }
-
-  console.log(`Starting audio stream for patient ${patientId}...`);
+export const startStreamingAudio = async (patientId, token, onMessageReceived = () => {}) => {
+  if (_isStreaming) return true;
   try {
-    // --- 1. Prepare Audio Recording ---
-    await Audio.setAudioModeAsync({ // Ensure recording is allowed
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-    });
+    const sessionId = `sess-${Date.now()}`;
+    // Use dictation endpoint in backend (ws/dictation)
+    const wsUrl = `${BASE_URL.replace('http', 'ws')}/ws/dictation/${sessionId}?encounter_id=${patientId}&token=${token}`;
+    console.log('Opening WS:', wsUrl);
+    _ws = new WebSocket(wsUrl);
 
-    recording = new Audio.Recording();
+    _ws.onopen = () => console.log('Streaming WS open');
+    _ws.onmessage = (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        onMessageReceived(data);
+      } catch (e) {
+        // Not JSON (could be binary or plain text) — ignore for now
+      }
+    };
+    _ws.onerror = (e) => console.error('WS error', e.message || e);
+    _ws.onclose = () => console.log('WS closed');
 
-    // !! IMPORTANT !!
-    // We NEED the correct settings from the backend here.
-    // These are common defaults, but might be wrong.
-    // Ask your friend for: sampleRate, numberOfChannels, bitRate, encoding.
-    await recording.prepareToRecordAsync(
-       Audio.RecordingOptionsPresets.LOW_QUALITY // Placeholder preset
-       // Or specify detailed settings:
-       /* {
-            android: {
-                extension: '.wav', // Or '.m4a', '.amr_wb' etc.
-                outputFormat: Audio.AndroidOutputFormat.DEFAULT, // Confirm format
-                audioEncoder: Audio.AndroidAudioEncoder.DEFAULT, // Confirm encoder
-                sampleRate: 16000, // Example: 16kHz - CONFIRM
-                numberOfChannels: 1, // Mono - CONFIRM
-                bitRate: 128000, // CONFIRM
-            },
-            ios: {
-                extension: '.wav', // Or '.m4a', '.caf' etc.
-                outputFormat: Audio.IOSOutputFormat.LINEARPCM, // Confirm format
-                audioQuality: Audio.IOSAudioQuality.LOW, // Placeholder
-                sampleRate: 16000, // CONFIRM
-                numberOfChannels: 1, // CONFIRM
-                bitRate: 128000, // CONFIRM
-                linearPCMBitDepth: 16, // Example: 16-bit PCM - CONFIRM
-                linearPCMIsBigEndian: false, // CONFIRM
-                linearPCMIsFloat: false, // CONFIRM
-            },
-            web: {} // Add web config if needed
-       } */
-    );
+    // Start first recording segment
+    await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
 
-    // --- 2. Connect to WebSocket (Placeholder) ---
-    // Ask your friend for the EXACT WebSocket URL format
-    const websocketUrl = `${BASE_URL.replace('http', 'ws')}/ws/handoff/${patientId}`; // Guessing the WS URL
-    console.log('Connecting to WebSocket:', websocketUrl);
-    // let ws = new WebSocket(websocketUrl); // We'll uncomment and use this later
+    const startSegment = async () => {
+      _recording = new Audio.Recording();
+      await _recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await _recording.startAsync();
+    };
 
-    // ws.onopen = () => {
-    //   console.log('WebSocket Connected!');
-    //   // Ask friend: How should I authenticate? Send token immediately?
-    //   // ws.send(JSON.stringify({ type: 'auth', token: token }));
-    // };
-
-    // ws.onmessage = (event) => {
-    //   console.log('Message from server:', event.data);
-    //   try {
-    //      const message = JSON.parse(event.data);
-    //      // Pass the parsed message back to the RecordingScreen's callback
-    //      onMessageReceived(message);
-    //   } catch (e) {
-    //      console.error("Failed to parse WebSocket message:", e);
-    //   }
-    // };
-
-    // ws.onerror = (e) => console.error('WebSocket Error:', e.message);
-    // ws.onclose = (e) => console.log('WebSocket Closed!', e.code, e.reason);
-
-    // --- 3. Start Recording & Streaming (Placeholder) ---
-    // This part requires careful setup based on backend requirements.
-    // We might need to use recording.setOnRecordingStatusUpdate to get audio chunks
-    // or potentially use a different library if expo-av doesn't provide easy streaming.
-    await recording.startAsync();
-    console.log('Recording started! (Streaming logic still needs implementation)');
-
-    // Placeholder: Send audio chunks
-    /* recording.setOnRecordingStatusUpdate((status) => {
-        if (status.isRecording) {
-            // How to get the raw audio data chunk from 'status'?
-            // This is the missing piece for expo-av streaming.
-            // If we get 'chunk':
-            // if (ws && ws.readyState === WebSocket.OPEN) {
-            //    ws.send(chunk); // Send raw binary data
-            // }
+    const stopAndSendSegment = async () => {
+      if (!_recording) return;
+      try {
+        await _recording.stopAndUnloadAsync();
+      } catch (e) {
+        // ignore
+      }
+      const uri = _recording.getURI();
+      _recording = null;
+      if (!uri) return;
+      try {
+        const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+        // Send as plain base64 text frame. Backend will decode.
+        if (_ws && _ws.readyState === 1 && isBase64(base64)) {
+          _ws.send(base64);
         }
-    }); */
+      } catch (e) {
+        console.error('Failed to read/send audio segment', e);
+      } finally {
+        // cleanup temporary file
+        try { await FileSystem.deleteAsync(uri); } catch (e) {}
+      }
+      // start next segment
+      try { await startSegment(); } catch (e) { console.error('Failed to start next segment', e); }
+    };
 
-    return true; // Indicate success (for now)
-
+    await startSegment();
+    // Send segments every 1800ms (approx 1.6-1.8s per chunk)
+    _segmentInterval = setInterval(stopAndSendSegment, 1800);
+    _isStreaming = true;
+    return true;
   } catch (err) {
-    console.error('Failed to start recording', err);
-    Alert.alert('Error', `Could not start recording: ${err.message}`);
-    recording = null; // Reset recording object
+    console.error('startStreamingAudio error', err);
     return false;
   }
 };
 
-/**
- * Stops the audio recording and closes the WebSocket (Placeholder).
- */
 export const stopStreamingAudio = async () => {
-  if (!recording) {
-    console.log('No recording in progress.');
-    return;
+  if (!_isStreaming) return;
+  if (_segmentInterval) {
+    clearInterval(_segmentInterval);
+    _segmentInterval = null;
+  }
+  try {
+    if (_recording) {
+      try { await _recording.stopAndUnloadAsync(); } catch (e) {}
+      const uri = _recording.getURI();
+      _recording = null;
+      if (uri) {
+        try {
+          const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+          if (_ws && _ws.readyState === 1 && isBase64(base64)) {
+            _ws.send(base64);
+          }
+        } catch (e) {
+          console.error('Failed to send final audio chunk', e);
+        }
+        try { await FileSystem.deleteAsync(uri); } catch (e) {}
+      }
+    }
+  } catch (err) {
+    console.error('Error during stopStreamingAudio', err);
+  }
+  // Close ws
+  try { if (_ws) _ws.close(); } catch (e) {}
+  _ws = null;
+  _isStreaming = false;
+  try { await Audio.setAudioModeAsync({ allowsRecordingIOS: false }); } catch (e) {}
+};
+
+/**
+ * Upload a recorded audio file (local URI) to the backend REST upload endpoint.
+ * fileUri: local file URI returned by expo-av Recording.getURI()
+ * encounterId: encounter id integer
+ * token: bearer token
+ */
+export const uploadDictationFile = async (fileUri, encounterId, token) => {
+  if (MOCK) {
+    // In mock mode we don't have a server endpoint; return a fake response
+    return { status: 'ok', transcript: 'Mock transcript (upload)', note_id: null };
   }
 
-  console.log('Stopping audio stream...');
   try {
-    await recording.stopAndUnloadAsync();
-    const uri = recording.getURI();
-    console.log('Recording stopped. File saved (temporarily) at:', uri);
-    // Note: For streaming, we might not need the final file URI.
+    const url = `${BASE_URL}/api/v1/dictation/upload?encounter_id=${encodeURIComponent(encounterId)}`;
+    const form = new FormData();
+    // Derive filename and mime type conservatively
+    const filename = fileUri.split('/').pop() || 'recording.m4a';
+    const fileType = filename.endsWith('.wav') ? 'audio/wav' : 'audio/m4a';
+    form.append('file', { uri: fileUri, name: filename, type: fileType });
 
-    // --- Close WebSocket (Placeholder) ---
-    // Ask friend: How should I signal the end of the stream?
-    // if (ws) {
-    //   ws.send(JSON.stringify({ type: 'END_STREAM_CMD' })); // Example end signal
-    //   ws.close();
-    // }
-
-  } catch (err) {
-    console.error('Failed to stop recording', err);
-    // Handle error appropriately
-  } finally {
-    recording = null; // Clear the recording object
-    // ws = null; // Clear WebSocket object
-    // Reset audio mode to allow playback etc.
-    await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        // Note: Do NOT set Content-Type; fetch will set multipart boundary automatically
+      },
+      body: form,
     });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || JSON.stringify(data));
+    return data;
+  } catch (err) {
+    console.error('uploadDictationFile error', err);
+    throw err;
   }
 };
 

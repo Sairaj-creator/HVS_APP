@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import { COLORS } from '../../constants/colors';
 import { FONTS, SIZES, SHADOWS } from '../../constants/theme';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import StyledButton from '../../components/common/StyledButton';
+import { startStreamingAudio, stopStreamingAudio, requestAudioPermissions } from '../../services/api';
 
 // Mock SBAR Checklist
 const MOCK_SBAR = [
@@ -23,13 +24,41 @@ const MOCK_SBAR = [
 const MOCK_TRANSCRIPT =
   "Patient is Sairaj Patil, P-12345. Admitted for chest pain. Vitals are stable, pain is 3/10. We've given morphine and are awaiting troponin results...";
 
-const RecordingScreen = ({ navigation }) => {
+const RecordingScreen = ({ navigation, route }) => {
+  const patientId = route?.params?.patientId;
   const [liveTranscript, setLiveTranscript] = useState(MOCK_TRANSCRIPT);
   const [checklist, setChecklist] = useState(MOCK_SBAR);
 
-  const handleStopRecording = () => {
-    // This will stop the audio stream and save the handoff
+  useEffect(() => {
+    let mounted = true;
+    const start = async () => {
+      const ok = await requestAudioPermissions();
+      if (!ok) return;
+      const started = await startStreamingAudio(patientId, route?.params?.token || '', (msg) => {
+        // Expect messages like { type: 'transcript_update', text, is_final }
+        if (!mounted) return;
+        if (msg && msg.type === 'transcript_update') {
+          // Append or replace transcript depending on finality
+          if (msg.is_final) {
+            setLiveTranscript((prev) => (prev ? prev + '\n' + msg.text : msg.text));
+          } else {
+            // show interim as temporary overlay
+            setLiveTranscript((prev) => msg.text);
+          }
+        }
+      });
+      console.log('startStreamingAudio returned', started);
+    };
+    start();
+    return () => {
+      mounted = false;
+      stopStreamingAudio();
+    };
+  }, []);
+
+  const handleStopRecording = async () => {
     console.log('Stopping recording...');
+    await stopStreamingAudio();
     // After saving, we go back to the patient notes
     navigation.goBack();
   };

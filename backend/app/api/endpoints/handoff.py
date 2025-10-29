@@ -7,6 +7,8 @@ from fastapi import (
     APIRouter,
     WebSocket,
     WebSocketDisconnect,
+    UploadFile,
+    File,
     Depends,
     Query,
     status
@@ -62,6 +64,68 @@ async def get_current_user_ws(
 # --- API Router Definition ---
 router = APIRouter()
 
+
+@router.post('/api/v1/dictation/upload')
+async def upload_dictation_file(
+    encounter_id: int = Query(..., description='Encounter ID for this dictation'),
+    file: UploadFile = File(...),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """
+    Accept a full audio file via multipart/form-data, transcode if needed, run ASR and save the note.
+
+    Form fields:
+    - encounter_id (query param)
+    - file (multipart file)
+
+    Authentication: Bearer token via standard OAuth2 header (uses deps.get_current_user)
+    """
+    import tempfile
+    import os
+    import subprocess
+    from app.services import asr_service
+
+    # Save uploaded file to a temporary location
+    suffix = os.path.splitext(file.filename)[1] or '.bin'
+    tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        contents = await file.read()
+        tmp_in.write(contents)
+        tmp_in.flush()
+        tmp_in.close()
+
+        # Prepare output WAV path
+        tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        tmp_out.close()
+
+        # Try to transcode using ffmpeg if available
+        ffmpeg_cmd = ['ffmpeg', '-y', '-i', tmp_in.name, '-ar', '16000', '-ac', '1', tmp_out.name]
+        try:
+            subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Run actual transcode
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            transcode_path = tmp_out.name
+        except Exception as e:
+            # ffmpeg not available or transcode failed - fall back to using original file
+            transcode_path = tmp_in.name
+
+        # Now transcribe and save using asr_service helper
+        try:
+            result = await asr_service.transcribe_file_and_save_note(transcode_path, encounter_id, current_user.id, note_type='doctor_dictation')
+        except Exception as e:
+            return { 'status': 'error', 'message': f'ASR/transcode failed: {str(e)}' }
+
+        return { 'status': 'ok', 'transcript': result.get('transcript'), 'note_id': result.get('note_id') }
+    finally:
+        try:
+            os.unlink(tmp_in.name)
+        except Exception:
+            pass
+        try:
+            os.unlink(tmp_out.name)
+        except Exception:
+            pass
+
 # --- WebSocket Endpoint for Dictation ---
 @router.websocket("/ws/dictation/{session_id}")
 async def websocket_dictation_endpoint(
@@ -101,13 +165,34 @@ async def websocket_dictation_endpoint(
             log.info(f"[{session_id}] Starting audio receive task.")
             while state and state.is_active:
                 try:
-                    audio_chunk = await websocket.receive_bytes()
-                    if state and state.audio_queue:
-                         await state.audio_queue.put(audio_chunk)
-                         log.debug(f"[{session_id}] Received {len(audio_chunk)} audio bytes.")
+                    # Use websocket.receive() to handle both binary and text frames.
+                    msg = await websocket.receive()
+                    audio_chunk = None
+                    # msg is a dict like {'type': 'websocket.receive', 'bytes': b'..'} or {'type': 'websocket.receive', 'text': '...'}
+                    if isinstance(msg, dict):
+                        if 'bytes' in msg and msg.get('bytes') is not None:
+                            audio_chunk = msg.get('bytes')
+                        elif 'text' in msg and msg.get('text'):
+                            # We expect base64-encoded audio sent as text frames from the RN client
+                            import base64
+                            try:
+                                audio_chunk = base64.b64decode(msg.get('text'))
+                            except Exception as _e:
+                                log.warning(f"[{session_id}] Received non-audio text frame or failed to decode base64.")
+                                audio_chunk = None
                     else:
-                         log.warning(f"[{session_id}] State or queue missing in receive task, stopping.")
-                         break
+                        # Fallback: try receive_bytes (older behaviour)
+                        try:
+                            audio_chunk = await websocket.receive_bytes()
+                        except Exception:
+                            audio_chunk = None
+
+                    if audio_chunk and state and state.audio_queue:
+                        await state.audio_queue.put(audio_chunk)
+                        log.debug(f"[{session_id}] Received {len(audio_chunk)} audio bytes.")
+                    else:
+                        # If no audio was parsed, continue the loop (or break on disconnect)
+                        continue
                 except WebSocketDisconnect:
                     log.warning(f"[{session_id}] Receive task: WebSocket disconnected by client.")
                     break # Exit loop cleanly on disconnect

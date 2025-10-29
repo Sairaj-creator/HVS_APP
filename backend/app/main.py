@@ -1,7 +1,9 @@
 # app/main.py
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
+import os
 from app.db.session import engine # Import the engine
 
 # --- Import Routers ---
@@ -27,6 +29,28 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI App Initialization ---
 app = FastAPI(title="HVS Backend", lifespan=lifespan)
+
+# --- CORS Configuration ---
+# Allow origins from an environment variable CORS_ORIGINS (comma-separated)
+# or default to a set of common local/dev origins used by Expo and web.
+cors_env = os.getenv("CORS_ORIGINS", "*")
+if cors_env.strip() == "*":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # --- Include Routers ---
 # Authentication routes

@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { StatusBar, View } from 'react-native'; // Added View for loading state
+import { StatusBar, View, Text } from 'react-native'; // Added View and Text for loading/debug state
 
 // Import theme colors (could import from theme now, but colors is fine too)
 import { COLORS } from './constants/colors';
@@ -30,12 +30,14 @@ const AppRoot = () => {
   if (isLoading) {
      // Return a simple blank view during this initial check
      // Or you could return a dedicated splash/loading screen component
-     return <View style={{ flex: 1, backgroundColor: COLORS.white }} />;
+    return <View style={{ flex: 1, backgroundColor: COLORS.white }} />;
   }
 
 
   return (
     <SafeAreaProvider>
+      {/* DEV DEBUG overlay removed: hide mock token from UI. If you need this overlay again,
+          re-enable by uncommenting the block below or by adding a feature flag. */}
       {/* Set status bar style using the defined statusBar color */}
       <StatusBar backgroundColor={COLORS.statusBar} barStyle="light-content" />
 

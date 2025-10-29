@@ -46,8 +46,9 @@ const RegisterScreen = ({ navigation }) => {
         mobile_number: mobileNumber, // <-- Add mobile number to data
         // Ask backend friend if other fields like triageNotes go here or in encounter
       };
-      const patient = await registerPatient(patientData, userToken);
-      const patientId = patient.patient_id;
+  const patient = await registerPatient(patientData, userToken);
+  // In mock DB the created patient uses `id` (not patient_id). Use whichever exists.
+  const patientId = patient.patient_id || patient.id;
 
       // Step 2: Create Encounter (Triage)
       const encounterData = {
@@ -67,7 +68,7 @@ const RegisterScreen = ({ navigation }) => {
 
       Alert.alert(
         'Success',
-        `Patient ${patient.full_name} was registered and admitted.`
+        `Patient ${patient.full_name || patient.name || patientId} was registered and admitted.`
       );
 
       // Clear the form

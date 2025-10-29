@@ -21,14 +21,15 @@ import { Picker } from '@react-native-picker/picker'; // Our new component
 
 
 const UserRegisterScreen = ({ navigation }) => {
-  const [username, setUsername] = useState(''); // This will be their email
+  const { signIn } = useAuth();
+  const [fullName, setFullName] = useState(''); // User's full name (we'll generate an email/username from this)
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [role, setRole] = useState('doctor'); // Default role
   const [isLoading, setIsLoading] = useState(false);
 
   const handleRegister = async () => {
-    if (!username || !password) {
+    if (!fullName || !password) {
       Alert.alert('Error', 'Please fill in all fields.');
       return;
     }
@@ -39,21 +40,40 @@ const UserRegisterScreen = ({ navigation }) => {
 
     setIsLoading(true);
     try {
+      // Generate a username (email) from the full name so the form doesn't require typing an email.
+      // e.g. "Alice Kumar" -> "alice.kumar@hospital.com"
+      const generateUsernameFromName = (name) => {
+        const cleaned = name
+          .trim()
+          .toLowerCase()
+          // remove characters except alphanumerics and spaces
+          .replace(/[^a-z0-9\s]/g, '')
+          .replace(/\s+/g, '.');
+        return `${cleaned}@hospital.com`;
+      };
+
+      const username = generateUsernameFromName(fullName);
+
       // This is the data your friend's API needs
       const userData = {
         username: username,
         password: password,
         role: role,
+        full_name: fullName,
       };
 
       // Call the API
       const result = await apiRegisterUser(userData);
 
-      Alert.alert(
-        'Success',
-        `User ${result.username} created! Please log in.`
-      );
-      navigation.goBack(); // Go back to the Login screen
+  Alert.alert('Success', `User ${result.username} created! Signing you in...`);
+
+      // After successful registration, automatically sign in and set token in AuthContext
+      if (signIn) {
+        await signIn(username, password);
+      }
+
+      // Go back (or the AuthProvider / navigator may redirect based on token)
+      navigation.goBack();
     } catch (error) {
       Alert.alert('Registration Failed', error.message);
     } finally {

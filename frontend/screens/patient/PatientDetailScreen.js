@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, useWindowDimensions } from 'react-native'; // Removed unused Text import
-import { TabView, SceneMap, TabBar } from 'react-native-tab-view';
+import { TabView, TabBar } from 'react-native-tab-view';
 import { useRoute } from '@react-navigation/native';
 
 // Import sub-screens
@@ -14,13 +14,23 @@ import PatientHistoryScreen from './PatientHistoryScreen';
 // Make sure constants/theme.js correctly exports FONTS
 import { COLORS, FONTS, SIZES } from '../../constants/theme';
 
-const renderScene = SceneMap({
-    summary: PatientSummaryScreen,
-    notes: PatientNotesScreen,
-    tasks: PatientTasksScreen,
-    meds: PatientMedsScreen,
-    history: PatientHistoryScreen,
-});
+// Render scene manually so we can pass navigation and patientId props to each
+const renderScene = (navigation, patientId) => ({ route }) => {
+  switch (route.key) {
+    case 'summary':
+      return <PatientSummaryScreen navigation={navigation} patientId={patientId} />;
+    case 'notes':
+      return <PatientNotesScreen navigation={navigation} patientId={patientId} />;
+    case 'tasks':
+      return <PatientTasksScreen navigation={navigation} patientId={patientId} />;
+    case 'meds':
+      return <PatientMedsScreen navigation={navigation} patientId={patientId} />;
+    case 'history':
+      return <PatientHistoryScreen navigation={navigation} patientId={patientId} />;
+    default:
+      return null;
+  }
+};
 
 const PatientDetailScreen = ({ navigation }) => {
     const layout = useWindowDimensions();
@@ -59,15 +69,15 @@ const PatientDetailScreen = ({ navigation }) => {
         />
     );
 
-    return (
-        <TabView
-            navigationState={{ index, routes }}
-            renderScene={renderScene}
-            onIndexChange={setIndex}
-            initialLayout={{ width: layout.width }}
-            renderTabBar={renderTabBar} // Use the render function
-        />
-    );
+  return (
+    <TabView
+      navigationState={{ index, routes }}
+      renderScene={renderScene(navigation, patientId)}
+      onIndexChange={setIndex}
+      initialLayout={{ width: layout.width }}
+      renderTabBar={renderTabBar} // Use the render function
+    />
+  );
 };
 
 // Styles for the TabView component
